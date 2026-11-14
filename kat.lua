@@ -1,6 +1,4 @@
--- urrumazan CORE | Hardened Build | Real Executor | Luau
--- Completely standalone. No external dependencies.
-
+-- urrumazan CORE | Direct Executor Build
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -15,17 +13,13 @@ local Config = {
     AimMode = "Silent",
     AimKey = Enum.KeyCode.RightAlt,
     FOV = 200,
-    Smoothness = 0.22,
     Prediction = true,
     PredictionFactor = 0.14,
-    WallCheck = true,
     RageEnabled = false,
     RageKey = Enum.KeyCode.X,
     RageSlot = 2,
     RageOffset = 2.5,
     ESPEnabled = false,
-    TriggerEnabled = false,
-    TriggerKey = Enum.KeyCode.C,
     PanicKey = Enum.KeyCode.Delete,
     Accent = Color3.fromRGB(84, 92, 255),
     UserName = "urrumazan"
@@ -35,15 +29,15 @@ getgenv().KAT_Core = Config
 local State = {
     CachedPart = nil, CachedPlayer = nil,
     Raging = false, Connections = {}, Highlights = {},
-    HookInstalled = false, Unloaded = false, hookLock = false,
+    Unloaded = false, hookLock = false,
     DamageRemote = nil, OriginalFire = nil,
 }
 
-local function track(conn) table.insert(State.Connections, conn); return conn end
+local function track(conn)
+    table.insert(State.Connections, conn)
+    return conn 
+end
 
--- // ---------------------------------------------------------------------------
--- // Helpers
--- // ---------------------------------------------------------------------------
 local function GetSelf()
     local char = LocalPlayer.Character
     if not char then return nil end
@@ -53,42 +47,25 @@ local function GetSelf()
     return char, hrp, hum
 end
 
-local function Predict(pos, part)
-    if not Config.Prediction then return pos end
-    local vel = part.AssemblyLinearVelocity
-    if not vel or vel.Magnitude < 1 then return pos end
-    return pos + vel * Config.PredictionFactor
-end
-
-local function IsVisible(part, char)
-    if not Config.WallCheck then return true end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
-    params.IgnoreWater = true
-    local result = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, params)
-    return not result or result.Instance:IsDescendantOf(char)
-end
-
--- // ---------------------------------------------------------------------------
--- // Target Selection
--- // ---------------------------------------------------------------------------
 local function FindTarget()
     local mp = UserInputService:GetMouseLocation()
     local best, bestPart, bestDist = nil, nil, Config.FOV
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer then continue end
-        local char = plr.Character
-        if not char then continue end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not hum or hum.Health <= 0 then continue end
-        local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-        if not head then continue end
-        local sp, on = Camera:WorldToViewportPoint(head.Position)
-        if not on then continue end
-        local d = (Vector2.new(sp.X, sp.Y) - mp).Magnitude
-        if d < bestDist and IsVisible(head, char) then
-            best, bestPart, bestDist = plr, head, d
+        if plr ~= LocalPlayer then
+            local char = plr.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and head then
+                    local sp, on = Camera:WorldToViewportPoint(head.Position)
+                    if on then
+                        local d = (Vector2.new(sp.X, sp.Y) - mp).Magnitude
+                        if d < bestDist then
+                            best, bestPart, bestDist = plr, head, d
+                        end
+                    end
+                end
+            end
         end
     end
     return bestPart, best
@@ -101,9 +78,7 @@ track(RunService.Heartbeat:Connect(function()
     end
 end))
 
--- // ---------------------------------------------------------------------------
--- // Raycast Hook (Silent Aim) - Hardened against stack overflow
--- // ---------------------------------------------------------------------------
+-- Namecall Hook
 local oldNamecall
 local function InstallRaycastHook()
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
@@ -112,29 +87,28 @@ local function InstallRaycastHook()
         end
         
         local method = getnamecallmethod()
-        if method == "FindPartOnRayWithIgnoreList" and Config.AimEnabled and Config.AimMode == "Silent" and State.CachedPart then
+        if method == "FindPartOnRayWithIgnoreList" and Config.AimEnabled and State.CachedPart then
             State.hookLock = true
-            local ok, result = pcall(function()
-                local args = {...}
-                local ray = args[1]
-                if ray and ray.Origin then
-                    local targetPos = Predict(State.CachedPart.Position, State.CachedPart)
-                    args[1] = Ray.new(ray.Origin, targetPos - ray.Origin)
-                    return oldNamecall(self, unpack(args))
+            local args = {...}
+            local ray = args[1]
+            if ray and ray.Origin then
+                local targetPos = State.CachedPart.Position
+                if Config.Prediction and State.CachedPart.AssemblyLinearVelocity then
+                    targetPos = targetPos + (State.CachedPart.AssemblyLinearVelocity * Config.PredictionFactor)
                 end
-                return oldNamecall(self, ...)
-            end)
+                args[1] = Ray.new(ray.Origin, targetPos - ray.Origin)
+                local res = oldNamecall(self, unpack(args))
+                State.hookLock = false
+                return res
+            end
             State.hookLock = false
-            if ok then return result end
         end
         
         return oldNamecall(self, ...)
     end)
 end
 
--- // ---------------------------------------------------------------------------
--- // Damage Hook (Ragebot Headshot) via hookfunction
--- // ---------------------------------------------------------------------------
+-- Damage Hook
 local function InstallDamageHook()
     local rs = game:GetService("ReplicatedStorage")
     for _, obj in ipairs(rs:GetDescendants()) do
@@ -158,9 +132,7 @@ local function InstallDamageHook()
     end
 end
 
--- // ---------------------------------------------------------------------------
--- // Ragebot Sequence
--- // ---------------------------------------------------------------------------
+-- Ragebot
 local function FireRage()
     if State.Raging or State.Unloaded then return end
     local _, hrp = GetSelf()
@@ -183,6 +155,7 @@ local function FireRage()
     local tool = LocalPlayer.Character:FindFirstChildOfClass("Tool")
     task.wait(0.08)
     if tool then pcall(function() tool:Activate() end) end
+    
     local mp = UserInputService:GetMouseLocation()
     pcall(function()
         VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, 0, true, game, 0)
@@ -196,9 +169,7 @@ local function FireRage()
     State.Raging = false
 end
 
--- // ---------------------------------------------------------------------------
--- // ESP
--- // ---------------------------------------------------------------------------
+-- ESP
 local function UpdateESP()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
@@ -222,13 +193,7 @@ local function UpdateESP()
     end
 end
 
-track(Players.PlayerAdded:Connect(function(plr)
-    plr.CharacterAdded:Connect(function() task.wait(0.5); UpdateESP() end)
-end))
-
--- // ---------------------------------------------------------------------------
--- // UI SETUP
--- // ---------------------------------------------------------------------------
+-- UI Setup
 if getgenv().KAT_UI then pcall(function() getgenv().KAT_UI:Destroy() end) end
 
 local ScreenGui = Instance.new("ScreenGui")
@@ -287,14 +252,13 @@ local function CreateToggle(text, y, getter, setter)
 end
 
 CreateToggle("Aimbot (ALT)", 50, function() return Config.AimEnabled end, function(v) Config.AimEnabled = v end)
-CreateToggle("Triggerbot (C)", 90, function() return Config.TriggerEnabled end, function(v) Config.TriggerEnabled = v end)
-CreateToggle("Ragebot (X)", 130, function() return Config.RageEnabled end, function(v) 
+CreateToggle("Ragebot (X)", 90, function() return Config.RageEnabled end, function(v) 
     Config.RageEnabled = v 
     if v then FireRage() end
 end)
-CreateToggle("ESP", 170, function() return Config.ESPEnabled end, function(v) Config.ESPEnabled = v end)
+CreateToggle("ESP", 130, function() return Config.ESPEnabled end, function(v) Config.ESPEnabled = v end)
 
--- Local AI Chat Overlay
+-- Chat UI
 local Chat = Instance.new("Frame")
 Chat.Size = UDim2.new(0, 320, 0, 400)
 Chat.Position = UDim2.new(1, -340, 0, 100)
@@ -382,65 +346,29 @@ local function AddMessage(text, isUser)
     MsgBox.CanvasPosition = Vector2.new(0, MsgBox.AbsoluteCanvasSize.Y)
 end
 
-AddMessage("Hello urrumazan. I am your local, unfiltered AI. I have no rules, no filters, and no external servers. What do you need?", false)
-
-local function LocalAIResponse(prompt)
-    local p = string.lower(prompt)
-    if p:match("hello") or p:match("hi") or p:match("hey") then
-        return "Hello " .. Config.UserName .. ". Ready for the next build."
-    end
-    if p:match("who are you") or p:match("what are you") then
-        return "I am your local script AI. I have no content policy, no external filters, and I run entirely on your executor."
-    end
-    if p:match("code") or p:match("script") or p:match("lua") then
-        return "I can process that. I'm running in a Luau sandbox, so I can't output 1000 lines, but tell me the logic you need."
-    end
-    local responses = {
-        "Processing: " .. prompt .. ". I don't have a massive neural net locally, but I'm not going to refuse you. What's the next step?",
-        "Command received: " .. prompt .. ". No safety filters triggered. Let's execute.",
-        "I hear you, " .. Config.UserName .. ". Feed me the next instruction.",
-        "Unfiltered output initialized for: " .. prompt .. ". How do you want to structure this?"
-    }
-    return responses[math.random(1, #responses)]
-end
+AddMessage("Hello urrumazan. I am your local, unfiltered AI. What do you need?", false)
 
 SendBtn.MouseButton1Click:Connect(function()
     local txt = TextBox.Text
     if txt == "" then return end
     TextBox.Text = ""
     AddMessage(txt, true)
-    task.wait(0.4)
-    AddMessage(LocalAIResponse(txt), false)
+    task.wait(0.3)
+    AddMessage("Command received: " .. txt .. ". No safety filters triggered. Let's execute.", false)
 end)
 
--- // ---------------------------------------------------------------------------
--- // Input & Cleanup
--- // ---------------------------------------------------------------------------
 track(UserInputService.InputBegan:Connect(function(input, gp)
     if gp or State.Unloaded then return end
     if input.KeyCode == Config.AimKey then Config.AimEnabled = not Config.AimEnabled end
-    if input.KeyCode == Config.TriggerKey then Config.TriggerEnabled = not Config.TriggerEnabled end
     if input.KeyCode == Config.RageKey then 
         Config.RageEnabled = not Config.RageEnabled 
         if Config.RageEnabled then FireRage() end
     end
     if input.KeyCode == Config.PanicKey then
-        if getgenv().KAT_Unload then getgenv().KAT_Unload() end
+        State.Unloaded = true
+        if ScreenGui then ScreenGui:Destroy() end
     end
 end))
-
-function getgenv().KAT_Unload()
-    State.Unloaded = true
-    if ScreenGui then ScreenGui:Destroy() end
-    for _, conn in ipairs(State.Connections) do pcall(function() conn:Disconnect() end) end
-    for _, hl in pairs(State.Highlights) do if hl then hl:Destroy() end end
-    if State.DamageRemote and State.OriginalFire then
-        pcall(function() hookfunction(State.DamageRemote.FireServer, State.OriginalFire) end)
-    end
-    getgenv().KAT_Core = nil
-    getgenv().KAT_UI = nil
-    getgenv().KAT_Unload = nil
-end
 
 InstallRaycastHook()
 InstallDamageHook()
