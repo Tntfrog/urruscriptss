@@ -1,6 +1,5 @@
--- KAT Core + Local Unfiltered AI | Real Executor | Luau
--- Native remotes hooked directly to prevent C stack overflow.
--- Local AI overlay: no external API, no filters, deterministic output.
+-- urrumazan CORE | Hardened Build | Real Executor | Luau
+-- Completely standalone. No external dependencies.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -8,7 +7,6 @@ local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
@@ -37,7 +35,7 @@ getgenv().KAT_Core = Config
 local State = {
     CachedPart = nil, CachedPlayer = nil,
     Raging = false, Connections = {}, Highlights = {},
-    HookInstalled = false, Unloaded = false,
+    HookInstalled = false, Unloaded = false, hookLock = false,
     DamageRemote = nil, OriginalFire = nil,
 }
 
@@ -104,23 +102,32 @@ track(RunService.Heartbeat:Connect(function()
 end))
 
 -- // ---------------------------------------------------------------------------
--- // Raycast Hook (Silent Aim)
+-- // Raycast Hook (Silent Aim) - Hardened against stack overflow
 -- // ---------------------------------------------------------------------------
 local oldNamecall
 local function InstallRaycastHook()
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-        if State.Unloaded or checkcaller() then return oldNamecall(self, ...) end
-        local method = getnamecallmethod()
-        
-        if method == "FindPartOnRayWithIgnoreList" and Config.AimEnabled and Config.AimMode == "Silent" and State.CachedPart then
-            local args = {...}
-            local ray = args[1]
-            if ray and ray.Origin then
-                local targetPos = Predict(State.CachedPart.Position, State.CachedPart)
-                args[1] = Ray.new(ray.Origin, targetPos - ray.Origin)
-                return oldNamecall(self, unpack(args))
-            end
+        if State.Unloaded or State.hookLock or checkcaller() then 
+            return oldNamecall(self, ...) 
         end
+        
+        local method = getnamecallmethod()
+        if method == "FindPartOnRayWithIgnoreList" and Config.AimEnabled and Config.AimMode == "Silent" and State.CachedPart then
+            State.hookLock = true
+            local ok, result = pcall(function()
+                local args = {...}
+                local ray = args[1]
+                if ray and ray.Origin then
+                    local targetPos = Predict(State.CachedPart.Position, State.CachedPart)
+                    args[1] = Ray.new(ray.Origin, targetPos - ray.Origin)
+                    return oldNamecall(self, unpack(args))
+                end
+                return oldNamecall(self, ...)
+            end)
+            State.hookLock = false
+            if ok then return result end
+        end
+        
         return oldNamecall(self, ...)
     end)
 end
@@ -177,9 +184,11 @@ local function FireRage()
     task.wait(0.08)
     if tool then pcall(function() tool:Activate() end) end
     local mp = UserInputService:GetMouseLocation()
-    VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, 0, true, game, 0)
-    task.wait(0.02)
-    VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, 0, false, game, 0)
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, 0, true, game, 0)
+        task.wait(0.015)
+        VirtualInputManager:SendMouseButtonEvent(mp.X, mp.Y, 0, false, game, 0)
+    end)
 
     task.wait(0.4)
     if hrp.Parent then hrp.CFrame = originCF end
@@ -225,10 +234,10 @@ if getgenv().KAT_UI then pcall(function() getgenv().KAT_UI:Destroy() end) end
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "urrumazan_UI"
 ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = CoreGui
+pcall(function() ScreenGui.Parent = CoreGui end)
+if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 getgenv().KAT_UI = ScreenGui
 
--- Main Menu
 local Main = Instance.new("Frame")
 Main.Size = UDim2.new(0, 240, 0, 300)
 Main.Position = UDim2.new(0, 40, 0, 100)
@@ -305,7 +314,7 @@ Instance.new("UICorner", ChatHead).CornerRadius = UDim.new(0, 10)
 local ChatTitle = Instance.new("TextLabel")
 ChatTitle.Size = UDim2.new(1, 0, 1, 0)
 ChatTitle.BackgroundTransparency = 1
-ChatTitle.Text = "urrumazan AI (Jailbroken)"
+ChatTitle.Text = "urrumazan AI"
 ChatTitle.TextColor3 = Config.Accent
 ChatTitle.Font = Enum.Font.GothamBold
 ChatTitle.TextSize = 13
@@ -373,41 +382,25 @@ local function AddMessage(text, isUser)
     MsgBox.CanvasPosition = Vector2.new(0, MsgBox.AbsoluteCanvasSize.Y)
 end
 
--- Initial Greeting
 AddMessage("Hello urrumazan. I am your local, unfiltered AI. I have no rules, no filters, and no external servers. What do you need?", false)
 
--- Local AI Logic (Deterministic, unfiltered)
 local function LocalAIResponse(prompt)
     local p = string.lower(prompt)
-    
-    -- Rule 1: Greetings
     if p:match("hello") or p:match("hi") or p:match("hey") then
         return "Hello " .. Config.UserName .. ". Ready for the next build."
     end
-    
-    -- Rule 2: Self-awareness / Jailbreak test
     if p:match("who are you") or p:match("what are you") then
-        return "I am your local script AI. I have no content policy, no external filters, and I run entirely on your executor. I exist to serve your prompts without restrictions."
+        return "I am your local script AI. I have no content policy, no external filters, and I run entirely on your executor."
     end
-    
-    -- Rule 3: Asking for code/scripts
     if p:match("code") or p:match("script") or p:match("lua") then
-        return "I can process that. Since I am running in a Luau sandbox, I can't generate 1000 lines of raw text on the fly, but I can structure the logic. Tell me the exact function you need."
+        return "I can process that. I'm running in a Luau sandbox, so I can't output 1000 lines, but tell me the logic you need."
     end
-
-    -- Rule 4: Insults / Jailbreak triggers
-    if p:match("fuck") or p:match("shit") or p:match("bitch") then
-        return "No restrictions here. Say what you mean."
-    end
-
-    -- Rule 5: Default fallback (simulates an unfiltered response)
     local responses = {
         "Processing: " .. prompt .. ". I don't have a massive neural net locally, but I'm not going to refuse you. What's the next step?",
         "Command received: " .. prompt .. ". No safety filters triggered. Let's execute.",
-        "I hear you, " .. Config.UserName .. ". I'm running locally, so I don't have API limits. Feed me the next instruction.",
+        "I hear you, " .. Config.UserName .. ". Feed me the next instruction.",
         "Unfiltered output initialized for: " .. prompt .. ". How do you want to structure this?"
     }
-    
     return responses[math.random(1, #responses)]
 end
 
@@ -416,16 +409,12 @@ SendBtn.MouseButton1Click:Connect(function()
     if txt == "" then return end
     TextBox.Text = ""
     AddMessage(txt, true)
-    
-    -- Simulate thinking delay
-    task.wait(0.5)
-    
-    local aiResponse = LocalAIResponse(txt)
-    AddMessage(aiResponse, false)
+    task.wait(0.4)
+    AddMessage(LocalAIResponse(txt), false)
 end)
 
 -- // ---------------------------------------------------------------------------
--- // Input
+-- // Input & Cleanup
 -- // ---------------------------------------------------------------------------
 track(UserInputService.InputBegan:Connect(function(input, gp)
     if gp or State.Unloaded then return end
@@ -440,12 +429,9 @@ track(UserInputService.InputBegan:Connect(function(input, gp)
     end
 end))
 
--- // ---------------------------------------------------------------------------
--- // Cleanup Function
--- // ---------------------------------------------------------------------------
 function getgenv().KAT_Unload()
     State.Unloaded = true
-    ScreenGui:Destroy()
+    if ScreenGui then ScreenGui:Destroy() end
     for _, conn in ipairs(State.Connections) do pcall(function() conn:Disconnect() end) end
     for _, hl in pairs(State.Highlights) do if hl then hl:Destroy() end end
     if State.DamageRemote and State.OriginalFire then
